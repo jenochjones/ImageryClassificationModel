@@ -5,17 +5,13 @@ Created on Sat Dec 14 14:14:19 2024
 
 @author: jonjones
 """
-
-
-
-# File paths
-input_tif_file = "./TifFiles/SalemBoundary_Masked.tif"
-model_file = "./ImageryModel.joblib"
-output_tif_file = "./TifFiles/SalemBoundary_Classified.tif"
-
 import rasterio
 import numpy as np
 import joblib
+import time
+
+# Start the timer
+start_time = time.time()
 
 # File paths
 input_raster_path = "./TifFiles/SalemBoundary_Masked.tif"
@@ -28,50 +24,42 @@ print(f"Model loaded from {model_path}")
 
 # Load the input raster
 with rasterio.open(input_raster_path) as src:
-    raster = src.read()  # Shape: (bands, rows, cols)
+    profile = src.profile
     transform = src.transform
     crs = src.crs
-    profile = src.profile
 
-# Get raster dimensions
-bands, rows, cols = raster.shape
+    # Update the profile for the classified raster
+    profile.update(count=1, dtype='uint8')
 
-# Ensure the raster is large enough for a 500x500 crop
-if rows < 500 or cols < 500:
-    raise ValueError("The input raster is smaller than 500x500 cells.")
+    # Open the output file for writing
+    with rasterio.open(classified_raster_output_path, "w", **profile) as dst:
 
-# Compute the center of the raster
-center_row = rows // 2
-center_col = cols // 2
+        # Process the raster in chunks (windows)
+        for window_idx, window in src.block_windows(1):
 
-# Determine the crop window for a 500x500 square
-start_row = max(center_row - 250, 0)
-start_col = max(center_col - 250, 0)
-end_row = start_row + 500
-end_col = start_col + 500
+            # Read the current window
+            raster_window = src.read(window=window)  # Shape: (bands, rows, cols)
 
-# Ensure the window is within bounds
-if end_row > rows or end_col > cols:
-    raise ValueError("The 500x500 crop exceeds raster bounds.")
+            # Reshape the window for prediction (pixels, bands)
+            bands, rows, cols = raster_window.shape
+            pixels = raster_window.reshape(bands, -1).T  # Shape: (pixels, bands)
 
-# Extract the 500x500 square
-raster_crop = raster[:, start_row:end_row, start_col:end_col]  # Shape: (bands, 500, 500)
+            # Predict using the trained model
+            print(f"Processing window {window}...")
+            classified_pixels = clf.predict(pixels)
 
-# Reshape the crop for prediction (pixels, bands)
-pixels = raster_crop.reshape(bands, -1).T  # Shape: (pixels, bands)
+            # Reshape the classified data back to the window dimensions
+            classified_window = classified_pixels.reshape(rows, cols)
 
-# Predict using the trained model
-classified_pixels = clf.predict(pixels)
-
-# Reshape the classified data back to 500x500
-classified_crop = classified_pixels.reshape(500, 500)
-
-# Save the classified crop to a new GeoTIFF
-profile.update(height=500, width=500, count=1, dtype='uint8', transform=rasterio.windows.transform(
-    rasterio.windows.Window(start_col, start_row, 500, 500), transform
-))
-
-with rasterio.open(classified_raster_output_path, "w", **profile) as dst:
-    dst.write(classified_crop.astype("uint8"), 1)
+            # Write the classified window to the output raster
+            dst.write(classified_window.astype("uint8"), 1, window=window)
 
 print(f"Classified raster saved to {classified_raster_output_path}")
+
+# Stop the timer
+end_time = time.time()
+
+# Calculate the elapsed time
+elapsed_time = end_time - start_time
+print(f"Script execution time: {elapsed_time:.2f} seconds")
+
