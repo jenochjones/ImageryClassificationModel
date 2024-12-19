@@ -6,65 +6,72 @@ Created on Sat Dec 14 14:14:19 2024
 @author: jonjones
 """
 
-import numpy as np
+
+
+# File paths
+input_tif_file = "./TifFiles/SalemBoundary_Masked.tif"
+model_file = "./ImageryModel.joblib"
+output_tif_file = "./TifFiles/SalemBoundary_Classified.tif"
+
 import rasterio
+import numpy as np
 import joblib
 
 # File paths
-input_tif_file = "./Imagery/SalemBoundary_Masked.tif"
-model_file = "./ImageryModel.joblib"
-output_tif_file = "./Imagery/SalemBoundary_Classified.tif"
+input_raster_path = "./TifFiles/SalemBoundary_Masked.tif"
+model_path = "./ImageryModel.pkl"
+classified_raster_output_path = "./TifFiles/Salem_Classified.tif"
 
 # Load the trained model
-clf = joblib.load(model_file)
+clf = joblib.load(model_path)
+print(f"Model loaded from {model_path}")
 
-# Load the raster data
-with rasterio.open(input_tif_file) as src:
-    raster_data = src.read(1)
+# Load the input raster
+with rasterio.open(input_raster_path) as src:
+    raster = src.read()  # Shape: (bands, rows, cols)
     transform = src.transform
-    nodata_value = src.nodata
-    meta = src.meta
+    crs = src.crs
+    profile = src.profile
 
-# Ensure nodata_value is a valid integer
-if nodata_value is None:
-    nodata_value = -9999  # Assign a default nodata value
+# Get raster dimensions
+bands, rows, cols = raster.shape
 
-# Prepare the raster for classification
-buffer = 1  # Neighborhood buffer size
-classified_data = np.full(raster_data.shape, nodata_value, dtype=np.int32)
+# Ensure the raster is large enough for a 500x500 crop
+if rows < 500 or cols < 500:
+    raise ValueError("The input raster is smaller than 500x500 cells.")
 
-# Classify each pixel
-for i in range(raster_data.shape[0]):
-    for j in range(raster_data.shape[1]):
-        if raster_data[i, j] == nodata_value:
-            continue
+# Compute the center of the raster
+center_row = rows // 2
+center_col = cols // 2
 
-        # Extract the neighborhood around the pixel
-        neighbors = raster_data[max(0, i - buffer): i + buffer + 1, max(0, j - buffer): j + buffer + 1]
+# Determine the crop window for a 500x500 square
+start_row = max(center_row - 250, 0)
+start_col = max(center_col - 250, 0)
+end_row = start_row + 500
+end_col = start_col + 500
 
-        # Ensure neighbors array matches the expected input size
-        if neighbors.shape[0] < 2 * buffer + 1 or neighbors.shape[1] < 2 * buffer + 1:
-            continue
+# Ensure the window is within bounds
+if end_row > rows or end_col > cols:
+    raise ValueError("The 500x500 crop exceeds raster bounds.")
 
-        neighbors = neighbors.flatten()
+# Extract the 500x500 square
+raster_crop = raster[:, start_row:end_row, start_col:end_col]  # Shape: (bands, 500, 500)
 
-        # If the neighborhood contains nodata values, skip
-        if nodata_value is not None and np.any(neighbors == nodata_value):
-            continue
+# Reshape the crop for prediction (pixels, bands)
+pixels = raster_crop.reshape(bands, -1).T  # Shape: (pixels, bands)
 
-        # Pad the neighborhood to match the expected feature size
-        expected_features = clf.n_features_in_
-        if len(neighbors) < expected_features:
-            neighbors = np.pad(neighbors, (0, expected_features - len(neighbors)), constant_values=nodata_value)
+# Predict using the trained model
+classified_pixels = clf.predict(pixels)
 
-        # Predict the class using the trained model
-        predicted_class = clf.predict([neighbors])[0]
-        classified_data[i, j] = predicted_class
+# Reshape the classified data back to 500x500
+classified_crop = classified_pixels.reshape(500, 500)
 
-# Save the classified raster
-meta.update(dtype=rasterio.int32, nodata=nodata_value)
+# Save the classified crop to a new GeoTIFF
+profile.update(height=500, width=500, count=1, dtype='uint8', transform=rasterio.windows.transform(
+    rasterio.windows.Window(start_col, start_row, 500, 500), transform
+))
 
-with rasterio.open(output_tif_file, "w", **meta) as dst:
-    dst.write(classified_data, 1)
+with rasterio.open(classified_raster_output_path, "w", **profile) as dst:
+    dst.write(classified_crop.astype("uint8"), 1)
 
-print(f"Classified raster saved to {output_tif_file}")
+print(f"Classified raster saved to {classified_raster_output_path}")
